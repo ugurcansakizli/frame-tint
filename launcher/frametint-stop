@@ -1,0 +1,15 @@
+#!/bin/bash
+# Stops Frame Tint and its helper programs.
+STATE="$HOME/.local/state/frametint"; PIDF="$STATE/pid"
+if [ -f "$PIDF" ]; then
+  PID=$(cat "$PIDF")
+  if kill -0 "$PID" 2>/dev/null; then
+    kill "$PID"
+    for i in $(seq 1 30); do kill -0 "$PID" 2>/dev/null || break; sleep 0.1; done
+    kill -9 "$PID" 2>/dev/null
+  fi
+  rm -f "$PIDF"
+fi
+pkill -u "$(id -u)" -x ftoverlay 2>/dev/null
+pkill -u "$(id -u)" -x ftgrab 2>/dev/null
+echo "Frame Tint stopped"

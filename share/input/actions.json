@@ -1,0 +1,28 @@
+{
+  "default_bindings": [
+    {
+      "controller_type": "frame_controller",
+      "binding_url": "bindings_frame_controller.json"
+    }
+  ],
+  "actions": [
+    {
+      "name": "/actions/frametint/in/toggle",
+      "type": "boolean",
+      "requirement": "suggested"
+    }
+  ],
+  "action_sets": [
+    {
+      "name": "/actions/frametint",
+      "usage": "leftright"
+    }
+  ],
+  "localization": [
+    {
+      "language_tag": "en_US",
+      "/actions/frametint": "Frame Tint",
+      "/actions/frametint/in/toggle": "Show / hide Frame Tint"
+    }
+  ]
+}

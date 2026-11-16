@@ -1,0 +1,27 @@
+{
+  "action_manifest_version": 0,
+  "alias_info": {},
+  "app_key": "system.generated.ftoverlay",
+  "bindings": {
+    "/actions/frametint": {
+      "sources": [
+        {
+          "path": "/user/hand/left/input/view",
+          "mode": "button",
+          "parameters": {},
+          "inputs": {
+            "double": {
+              "output": "/actions/frametint/in/toggle"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "category": "steamvr_input",
+  "controller_type": "frame_controller",
+  "description": "Double-tap View on the left controller to show or hide Frame Tint.",
+  "name": "Frame Tint defaults",
+  "options": {},
+  "simulated_actions": []
+}

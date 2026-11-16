@@ -1,0 +1,13 @@
+#!/bin/bash
+# Starts Frame Tint (does nothing if it is already running). This process becomes the Frame Tint program itself.
+ROOT="${FT_HOME:-$HOME/.local/share/frametint}"
+STATE="$HOME/.local/state/frametint"; mkdir -p "$STATE"
+PIDF="$STATE/pid"; LOG="$STATE/frametint.log"
+if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then echo "Frame Tint is already running"; exit 0; fi
+CONF="$HOME/.config/frametint/frametint.conf"
+[ -f "$CONF" ] && { set -a; . "$CONF"; set +a; }
+export FT_HOME="$ROOT"
+cd "$ROOT/lib" || exit 1
+echo $$ > "$PIDF"
+: > "$LOG"
+exec "$ROOT/venv/bin/python" live_server.py >> "$LOG" 2>&1

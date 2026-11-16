@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Frame Tint
+Comment=Color passthrough for the Steam Frame
+Exec=@BIN@/frametint-start
+Icon=@ROOT@/share/icon.png
+Terminal=false
+Categories=Utility;

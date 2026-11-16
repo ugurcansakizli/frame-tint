@@ -1,0 +1,15 @@
+# build output and Python environments
+build/
+venv/
+__pycache__/
+*.pyc
+# the two shipped models in models/ are committed; other weights are not
+*.pt
+*.onnx
+!models/ddcolor-fast2-8bit-256.onnx
+!models/fastsam-s.onnx
+# recordings and calibration copies contain pictures of your room and your headset's serial numbers: never commit them
+*.npz
+xrservice.json
+device_config.json
+*.pgm

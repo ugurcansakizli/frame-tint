@@ -1,0 +1,7 @@
+# keep Linux line endings for everything that runs on the headset, even if committed from Windows
+* text=auto eol=lf
+*.sh text eol=lf
+launcher/frametint-start text eol=lf
+launcher/frametint-stop text eol=lf
+*.png binary
+*.ttf binary

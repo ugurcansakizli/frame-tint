@@ -1,0 +1,4 @@
+# Versions the author tested on the Steam Frame (Python 3.14, aarch64).
+numpy==2.5.5
+opencv-python-headless==5.0.0.93
+onnxruntime==1.32.0
