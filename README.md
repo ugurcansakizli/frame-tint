@@ -84,21 +84,13 @@ To remove everything: `bash uninstall.sh`.
 
 The full list, with explanations, is at the top of [`src/server/live_server.py`](src/server/live_server.py).
 
-## Screenshots
+## Example
 
-Left: what the Frame's camera gives you (black and white). Right: the same moment with Frame Tint, running on the headset.
-The colors are a plausible guess by a neural network, not the real colors: walls, wood and skin usually come out right,
-unusual objects may not. Photos taken through the headset's front camera.
+Left: a black-and-white picture from the Frame's front camera. Right: the same picture colored by the color model alone
+(no color memory, edge snapping or outline model, so it is a little rougher than on the headset). The colors are a
+plausible guess by a neural network, not the real colors: walls, wood and skin usually come out right, unusual objects may not.
 
-![Black and white camera picture next to Frame Tint's colored picture, four examples](docs/images/comparison.jpg)
-
-The color model alone, on two of those camera pictures (no color memory, edge snapping or outline model, so a little rougher
-than the headset; made with [`tools/colorize_image.py`](tools/README.md)):
-
-![Black and white camera picture next to the color model's output, two examples](docs/images/model-only.jpg)
-
-With Frame Tint running, `http://frame:8000/compare.png` (from a PC on the same network) gives the same kind of side-by-side
-for your own room.
+![Black and white camera pictures next to the color model's output, two examples](docs/images/model-only.jpg)
 
 ## Troubleshooting
 
