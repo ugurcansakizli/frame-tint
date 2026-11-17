@@ -7,6 +7,14 @@ guesses colors for them with a neural colorization model (DDColor) on the headse
 direction in the room using head tracking, and shows the result as an overlay in SteamVR. No PC and no extra camera
 hardware are involved.
 
+## Example
+
+Left: a black-and-white picture from the Frame's front camera. Right: the same picture colored by the color model alone
+(no color memory, edge snapping or outline model, so it is a little rougher than on the headset). The colors are a
+plausible guess by a neural network, not the real colors: walls, wood and skin usually come out right, unusual objects may not.
+
+![Black and white camera pictures next to the color model's output, two examples](docs/images/model-only.jpg)
+
 > **Status: experimental prototype.** It works on the author's headset, with known rough edges
 > (see [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md)). The colors are plausible guesses made by a neural network, **not
 > true colors**: a red wall can come out orange, and new or fast-moving things stay grey until the next color answer.
@@ -83,14 +91,6 @@ To remove everything: `bash uninstall.sh`.
 | `FT_POSE_LAG` | seconds between a camera exposure and the head pose assumed for it | 0.02 |
 
 The full list, with explanations, is at the top of [`src/server/live_server.py`](src/server/live_server.py).
-
-## Example
-
-Left: a black-and-white picture from the Frame's front camera. Right: the same picture colored by the color model alone
-(no color memory, edge snapping or outline model, so it is a little rougher than on the headset). The colors are a
-plausible guess by a neural network, not the real colors: walls, wood and skin usually come out right, unusual objects may not.
-
-![Black and white camera pictures next to the color model's output, two examples](docs/images/model-only.jpg)
 
 ## Troubleshooting
 
