@@ -12,4 +12,5 @@ if [ -f "$PIDF" ]; then
 fi
 pkill -u "$(id -u)" -x ftoverlay 2>/dev/null
 pkill -u "$(id -u)" -x ftgrab 2>/dev/null
+pkill -u "$(id -u)" -f '/bin/ftgrab ' 2>/dev/null   # a grabber that restarted itself (after the cameras restarted) is named "exe"
 echo "Frame Tint stopped"

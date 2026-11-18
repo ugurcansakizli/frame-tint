@@ -82,12 +82,21 @@ To remove everything: `bash uninstall.sh`.
 | `FT_STEREO` | `1`: one view per eye (experimental). `0`: one flat picture from the right camera (more reliable) | shipped config: `0` |
 | `FT_RES` | width of the picture in pixels; 960 is near the camera's real detail, 640 is faster | 640 (shipped config: 960) |
 | `FT_SCALE` | size of the panel: 1 = life size (fills most of the view), 0.5 = half | 0.5 (shipped config: 1) |
-| `FT_VIVID` | how much stronger than the model's own answer the colors are shown (1 = as is) | 1.8 (shipped config: 1.2) |
-| `FT_BALANCE` | white balance, 0..1: how much of the picture's overall color cast is removed | 0.5 (shipped config: 0.3) |
+| `FT_VIVID` | how much stronger than the model's own answer the colors are shown (1 = as is) | 1.8 |
+| `FT_BALANCE` | white balance, 0..1: how much of the picture's overall color cast is removed | 0.5 (shipped config: 0.6) |
+| `FT_CONTRAST` | 0..1: photo-like brightness: black blacks, white whites and local contrast (the camera's own picture is flat and milky) | 1 |
+| `FT_MODEL_CONTRAST` | `0` switches off the same contrast correction for the color model's input (with it, the model guesses less orange) | on |
+| `FT_STEADY` | 0..1: how much of each new picture's colors is taken; lower = steadier colors (anything that moves still updates at once) | 0.2 |
+| `FT_SOLID` | `0` switches off keeping averaged colors at full strength (averaging different colors otherwise turns them muddy) | on |
+| `FT_DEGRAIN` / `FT_SHARP` | `1` switches on grain removal (also halves fine detail) / edge-following color enlargement (costs 6 ms, little gain) | off |
 | `FT_ALPHA` | opacity of the panel, 0..1 | 1 |
 | `FT_IPD` | distance between your eyes in metres (used with `FT_STEREO=1`) | 0.063 |
 | `FT_THINGS` / `FT_MEMORY` / `FT_SNAP` / `FT_PIN` | `0` switches off: outline model / color memory / edge snapping / pinning the picture to the room | on |
 | `FT_CORES`, `FT_DISPLAY_CORES`, `FT_LEFT_CORES`, `FT_THINGS_CORES` | which CPU cores each part may use (the headset has 8: cores 2-7 are the fast ones) | `4,5,6,7` / `2` / `3` / `3` (`0,1` with stereo) |
+| `FT_FOVEA` | `1`: more detailed colors where you look, using the headset's eye tracking. Every other color answer looks only at the area around your gaze; the rest of the view keeps its colors | 0 |
+| `FT_FOVEA_DEG` / `FT_FOVEA_EVERY` | width of that area in degrees / one answer in this many is a gaze-area answer | 60 / 2 |
+| `FT_MODEL` | the color model's file name in the models folder | `ddcolor-fast2-8bit-256.onnx` |
+| `FT_REMOTE` | `<PC address>:8765`: use the optional PC helper (large model on the PC's graphics card, see [pc/README.md](pc/README.md)); falls back to the headset model when the PC does not answer | off |
 | `FT_POSE_LAG` | seconds between a camera exposure and the head pose assumed for it | 0.02 |
 
 The full list, with explanations, is at the top of [`src/server/live_server.py`](src/server/live_server.py).
