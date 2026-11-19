@@ -27,6 +27,21 @@
 #   FT_THINGS  set to 0 to switch off the outline model (one color per thing); needs fastsam-s.onnx (see models/README.md) and segmenter.py
 #   FT_SNAP    set to 0 to switch off edge snapping (colors cut to the outlines of things)
 #   FT_PIN     set to 0 to stop pinning each picture to the room (the panel then rides with the head)
+#   FT_MODEL   the color model's file name in the models folder (default ddcolor-fast2-8bit-256.onnx)
+#   FT_REMOTE  <PC address>:<port> of the optional PC helper (pc/colorize_server.py): the large color model runs on the
+#              PC's graphics card; when the PC does not answer, the headset's own model is used (default: off)
+#   FT_FOVEA   set to 1 for more detailed colors where you look (uses the headset's eye tracking): every other color
+#              answer looks only at the area around your gaze, so the model sees it bigger; the rest of the view keeps
+#              its colors from the whole-view answers and the color memory
+#   FT_FOVEA_DEG    width of that area in degrees (default 60; smaller = more detail but less context for the model)
+#   FT_FOVEA_EVERY  one answer in this many is a gaze-area answer (default 2)
+#   FT_CONTRAST  0..1: photo-like brightness shown: black blacks, white whites, local contrast (default 1)
+#   FT_MODEL_CONTRAST  set to 0 to give the color model the camera's flat picture instead of a contrast-corrected one
+#   FT_STEADY  0..1: how much of each new picture's colors is taken; lower = steadier, less flicker (default 0.2)
+#   FT_SOLID   set to 0 to let averaged colors go muddy (by default they keep the strength of the colors averaged)
+#   FT_DEGRAIN set to 1 to remove the camera's grain (a median filter: also halves fine detail; default off)
+#   FT_SHARP   set to 1 to fit the colors to the full-size picture's edges (costs about 6 ms; default off)
+#   Most of these can also be changed while running, from the headset itself: curl "localhost:8000/set?steady=0.3&vivid=2"
 #
 # Color memory: colors are stored by direction in the room (using the headset's own head tracking), so a thing keeps
 # its color when you look away and back, colors stay put when you turn your head, and every new answer for a spot is
@@ -54,7 +69,7 @@ def model_file(name):
     for d in (os.path.join(ROOT, 'models'), HERE):
         if os.path.exists(os.path.join(d, name)): return os.path.join(d, name)
     return os.path.join(ROOT, 'models', name)
-MODEL = next((a for a in sys.argv[1:] if not a.startswith('--')), 'ddcolor-fast2-8bit-256.onnx')
+MODEL = next((a for a in sys.argv[1:] if not a.startswith('--')), os.environ.get('FT_MODEL', 'ddcolor-fast2-8bit-256.onnx'))
 PORT = int(os.environ.get('FT_PORT', '8000'))
 GRAB = os.environ.get('FT_GRAB', os.path.join(ROOT, 'bin', 'ftgrab') + ' 0 0 . 1').split()
 STDIN = '--stdin' in sys.argv
@@ -66,6 +81,18 @@ PW, PH = 640, 480            # size the color work is based on
 OW = max(PW, int(os.environ.get('FT_RES', str(PW))) // 8 * 8); OH = OW * PH // PW      # size of the picture shown
 MEMORY = os.environ.get('FT_MEMORY', '1') != '0'
 VIVID = float(os.environ.get('FT_VIVID', '1.8'))
+TUNE = {'vivid': VIVID,                                         # can be changed while running: /set?vivid=1.5&sharp=0&solid=0 (from the headset only)
+        'sharp': os.environ.get('FT_SHARP', '0') != '0',        # colors sharpened to the full-size picture's edges (costs 6 ms, little gain)
+        'degrain': os.environ.get('FT_DEGRAIN', '0') != '0',    # remove the camera's grain from the brightness shown (a median filter: also halves fine detail)
+        'model_contrast': os.environ.get('FT_MODEL_CONTRAST', '1') != '0',   # the color model sees a contrast-corrected picture
+        'solid': os.environ.get('FT_SOLID', '1') != '0',        # averaged colors keep their strength instead of going muddy
+        'balance': float(os.environ.get('FT_BALANCE', '0.5')),  # white balance (see BALANCE)
+        'contrast': float(os.environ.get('FT_CONTRAST', '1')),  # 0..1: photo-like brightness shown: black blacks, white whites, local contrast
+        'fovea': True,                                          # gaze-area answers (with FT_FOVEA=1)
+        'remote': True,                                         # use the PC helper when FT_REMOTE is set
+        'steady': float(os.environ.get('FT_STEADY', '0.2'))}    # 0..1: how much of each new picture's colors is taken (1 = no smoothing over time)
+STEADY = {'ab': None, 'g': None, 'R': None}                   # the colors last shown, for smoothing over time
+LEVELS = {'lo': None, 'hi': None}                             # the picture's darkest and brightest levels, smoothed
 BALANCE = float(os.environ.get('FT_BALANCE', '0.5'))
 THINGS_EVERY = float(os.environ.get('FT_THINGS_EVERY', '0.2'))
 STEREO = os.environ.get('FT_STEREO', '1') != '0' and os.environ.get('FT_TINT', '0') == '0' and OVERLAY is not None
@@ -82,6 +109,9 @@ TW, TH_ = PW // 2, PH // 2    # the tint is soft, so a small picture is enough
 CORES = sorted(int(c) for c in os.environ.get('FT_CORES', '4,5,6,7').split(',') if c.strip() != '')
 POSE_LAG = float(os.environ.get('FT_POSE_LAG', '0.02'))   # a camera frame reaches us about this long after it was taken
 SMOOTH = 0.5                 # how much of the previous colors to keep at each new answer (steadier, slower to change)
+GAZE = os.environ.get('FT_FOVEA', '0') == '1' and OVERLAY is not None     # read the eye tracker (through ftoverlay)
+FOVEA_DEG = min(100.0, max(20.0, float(os.environ.get('FT_FOVEA_DEG', '60'))))
+FOVEA_EVERY = max(2, int(os.environ.get('FT_FOVEA_EVERY', '2')))
 
 def load_calibration():
     for p in ('/persist/xrservice.json', os.path.join(HERE, 'device_config.json')):
@@ -165,8 +195,9 @@ class Memory:
         u, v = np.meshgrid(u, v)
         d = np.stack([(u - PW / 2) / VF, -(v - PH / 2) / VF, -np.ones_like(u)], -1)
         s.view_dirs = (d / np.linalg.norm(d, axis=-1, keepdims=True)).reshape(-1, 3).astype(np.float32); s.gshape = (gh, gw)
-    def write(s, ab, gray, R):
-        """ab: (2,h,w) colors for a camera frame, gray: that frame, R: how the head was turned. Any size, same view."""
+    def write(s, ab, gray, R, weight=None):
+        """ab: (2,h,w) colors for a camera frame, gray: that frame, R: how the head was turned. Any size, same view.
+        weight: optional (PH,PW) trust per spot of the view (1 = a normal answer)."""
         PW, PH, VF = s.PW, s.PH, s.VF
         dh = s.dirs @ R.astype(np.float32)             # room directions as seen from the head
         zf = -dh[:, 2]; ok = zf > 0.3; zs = np.where(ok, zf, 1)
@@ -181,6 +212,8 @@ class Memory:
         okc = ok[y0:y1, x0:x1]
         edge = np.minimum(np.minimum(um, PW - um) / (PW * 0.12), np.minimum(vm, PH - vm) / (PH * 0.12))
         e = np.where(okc, np.clip(edge - 0.25, 0, 1), 0).astype(np.float32)        # trust fades out toward the picture's edge
+        if weight is not None:                                                     # some spots of this answer count more
+            e *= cv2.remap(weight.astype(np.float32), um - 0.5, vm - 0.5, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
         sx, sy = ab.shape[2] / PW, ab.shape[1] / PH
         src = np.dstack([ab[0], ab[1], cv2.GaussianBlur(cv2.resize(gray, (ab.shape[2], ab.shape[1]), interpolation=cv2.INTER_AREA), (0, 0), 3).astype(np.float32)])
         new = cv2.remap(src, um * sx - 0.5, vm * sy - 0.5, cv2.INTER_LINEAR)
@@ -252,11 +285,9 @@ class Regions:
         return m
     def flatten(s, ab, gray):
         lab = s.labels(gray).ravel(); cnt = np.bincount(lab, minlength=s.n).astype(np.float32) + 1e-6
-        out = np.empty_like(ab)
-        for c in range(2):
-            mean = np.bincount(lab, weights=ab[..., c].ravel(), minlength=s.n) / cnt
-            out[..., c] = mean[lab].reshape(s.h, s.w)
-        return out, lab.reshape(s.h, s.w)
+        mean = np.stack([np.bincount(lab, weights=ab[..., c].ravel(), minlength=s.n) / cnt for c in range(2)], 1)
+        if TUNE['solid']: mean = keep_chroma(mean, np.bincount(lab, weights=cv2.magnitude(ab[..., 0], ab[..., 1]).ravel(), minlength=s.n) / cnt)
+        return mean[lab].reshape(s.h, s.w, 2).astype(np.float32), lab.reshape(s.h, s.w)
 
 class Things:
     def __init__(s, w, h):
@@ -273,6 +304,24 @@ class Things:
             g0 = cv2.warpPerspective(g0, homography, (s.w, s.h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE)
         fl = s.dis.calc(gray_small, g0, None)
         return cv2.remap(lab.astype(np.float32), s.gx + fl[..., 0], s.gy + fl[..., 1], cv2.INTER_NEAREST).astype(np.int32)
+def keep_chroma(mean, strength):
+    """mean (n,2) average a,b of some spots; strength (n,) their average color strength. An average of different colors
+    is weaker than the colors themselves (muddy, grey-brown); give it back the average strength, at most doubled."""
+    m = np.sqrt((mean * mean).sum(1)) + 1e-3
+    return mean * np.minimum(strength / m, 2.0)[:, None]
+
+def guided_up(ab, gray, guide, r=3, eps=0.004):
+    """sharp colors at full size: the edge-following fit of ab (h,w,2) to gray (h,w) is worked out small, then applied
+    with the full-size picture guide (H,W uint8), so colors stop at the edges of the full picture instead of bleeding."""
+    I = gray.astype(np.float32) / 255.0; k = (2 * r + 1, 2 * r + 1); H, W = guide.shape
+    mI = cv2.blur(I, k); vI = cv2.blur(I * I, k) - mI * mI
+    A = np.empty_like(ab); B = np.empty_like(ab)
+    for c in range(2):
+        p = ab[..., c]; mp = cv2.blur(p, k); cov = cv2.blur(I * p, k) - mI * mp
+        a = cov / (vI + eps); A[..., c] = cv2.blur(a, k); B[..., c] = cv2.blur(mp - a * mI, k)
+    Ig = (guide.astype(np.float32) / 255.0)[..., None]
+    return cv2.resize(A, (W, H), interpolation=cv2.INTER_LINEAR) * Ig + cv2.resize(B, (W, H), interpolation=cv2.INTER_LINEAR)
+
 def paint(ab, patch_lab, n_patch, thing_lab):
     """ab (h,w,2); patch_lab (h,w) edge-following patches of the newest frame; thing_lab (h,w) carried outlines.
     Each patch votes for the thing it mostly lies in; each thing gets the average color of its patches."""
@@ -281,14 +330,14 @@ def paint(ab, patch_lab, n_patch, thing_lab):
     owner = votes.argmax(1); share = votes[np.arange(n_patch), owner] / (votes.sum(1) + 1e-6)
     owner[share < 0.6] = 0                                   # a patch split between things stays on its own
     cnt = np.bincount(pl, minlength=n_patch).astype(np.float32) + 1e-6
-    out = np.empty_like(ab)
-    for c in range(2):
-        pm = np.bincount(pl, weights=ab[..., c].ravel(), minlength=n_patch) / cnt           # color per patch
-        tsum = np.bincount(owner, weights=pm * cnt, minlength=nt); tcnt = np.bincount(owner, weights=cnt, minlength=nt) + 1e-6
-        tm = tsum / tcnt                                                                     # color per thing
-        col = np.where(owner > 0, tm[owner], pm)
-        out[..., c] = col[pl].reshape(ab.shape[:2])
-    return out
+    pm = np.stack([np.bincount(pl, weights=ab[..., c].ravel(), minlength=n_patch) / cnt for c in range(2)], 1)   # color per patch
+    tcnt = np.bincount(owner, weights=cnt, minlength=nt) + 1e-6
+    tm = np.stack([np.bincount(owner, weights=pm[:, c] * cnt, minlength=nt) / tcnt for c in range(2)], 1)         # color per thing
+    if TUNE['solid']:                              # averaging different colors makes them muddy: keep their strength
+        pc = np.bincount(pl, weights=cv2.magnitude(ab[..., 0], ab[..., 1]).ravel(), minlength=n_patch) / cnt
+        pm = keep_chroma(pm, pc); tm = keep_chroma(tm, np.bincount(owner, weights=pc * cnt, minlength=nt) / tcnt)
+    col = np.where((owner > 0)[:, None], tm[owner], pm)
+    return col[pl].reshape(ab.shape[0], ab.shape[1], 2).astype(np.float32)
 
 SNAP = True
 STEREO_SRC = {'src': None}
@@ -299,12 +348,12 @@ def _tick(name, t):
 _regions = {}
 things = None                                      # set when the outline model is running
 
-def blend(mem, fol, gray, R, PW, PH):
+def blend(mem, fol, gray, R, PW, PH, guide=None):
     """the colors to show for the newest frame: remembered where the room still looks the same, followed elsewhere."""
     t = time.perf_counter()
     gs = cv2.resize(gray, (fol.w, fol.h), interpolation=cv2.INTER_AREA)
     fresh, miss = fol.render(gs, R)
-    fresh = fresh * (1 - 0.5 * _ss(miss.astype(np.float32), 30, 80))[..., None]     # no good match: tone the color down
+    fresh = fresh * (1 - (0.25 if TUNE['solid'] else 0.5) * _ss(miss.astype(np.float32), 30, 80))[..., None]     # no good match: tone the color down
     t = _tick('follow', t)
     if mem is not None and R is not None:
         mab, mL, c = mem.read(R)
@@ -326,13 +375,30 @@ def blend(mem, fol, gray, R, PW, PH):
             flat, pl = reg.flatten(fresh, gs)
             fresh = guided(flat, gs, 4, 0.002)
     t = _tick('edges', t)
-    if VIVID != 1:                                 # stronger colors; weak ones are pushed apart, strong ones level off
+    if TUNE['vivid'] != 1:                         # stronger colors; weak ones are pushed apart, strong ones level off
         fresh = np.ascontiguousarray(fresh, dtype=np.float32)
         c = cv2.magnitude(fresh[..., 0], fresh[..., 1]) + 1e-3
-        fresh = fresh * (75.0 * np.tanh(VIVID * c / 75.0) / c)[..., None]
+        fresh = fresh * (75.0 * np.tanh(TUNE['vivid'] * c / 75.0) / c)[..., None]
     t = _tick('vivid', t)
+    if TUNE['steady'] < 1:                         # smooth colors over time: keep most of the last picture's colors, turned
+        fresh = np.ascontiguousarray(fresh, dtype=np.float32)       # with the head, except where something really moved
+        P = STEADY
+        if P['ab'] is not None and P['ab'].shape == fresh.shape:
+            Hm = fol.K @ fol.S @ P['R'].T @ R @ fol.S @ fol.Ki if (R is not None and P['R'] is not None) else None
+            pab, pg = (P['ab'], P['g']) if Hm is None else (
+                cv2.warpPerspective(P['ab'], Hm, (fol.w, fol.h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE),
+                cv2.warpPerspective(P['g'], Hm, (fol.w, fol.h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE))
+            moved = _ss(cv2.GaussianBlur(cv2.absdiff(pg, gs), (0, 0), 2).astype(np.float32), 12, 35)
+            a = (TUNE['steady'] + (1 - TUNE['steady']) * moved)[..., None]
+            fresh = pab + (fresh - pab) * a
+        STEADY.update(ab=fresh.copy(), g=gs.copy(), R=None if R is None else R.copy())
+        t = _tick('steady', t)
     STEREO_SRC['src'] = (np.ascontiguousarray(fresh, dtype=np.float32), gs)      # the left eye borrows these colors
-    out = cv2.resize(fresh, (PW, PH), interpolation=cv2.INTER_LINEAR)
+    if TUNE['sharp'] and guide is not None and guide.shape == (PH, PW):
+        out = guided_up(np.ascontiguousarray(fresh, dtype=np.float32), gs, guide)
+    else:
+        out = cv2.resize(fresh, (PW, PH), interpolation=cv2.INTER_LINEAR)
+    _tick('upsize', t)
     return out.transpose(2, 0, 1)
 # --- end of color memory v2 ---
 
@@ -347,7 +413,7 @@ def pose_at(t):
         if best is None or abs(q[0] - t) < abs(best[0] - t): best = q
     return best if best is not None and abs(best[0] - t) < 0.25 else None
 
-acks = {'n': 0, 'w': 0, 't': time.time(), 'pw': 0, 'pt': time.time()}; ack_cv = threading.Condition()
+acks = {'n': 0, 'w': 0, 't': time.time(), 'pw': 0, 'pt': time.time(), 'gw': 0}; ack_cv = threading.Condition()
 def pose_reader(ovl):
     while True:
         rec = ovl.stdout.read(52)
@@ -365,16 +431,22 @@ def pose_reader(ovl):
             state['paused'] = struct.unpack('<f', rec[4:8])[0] == 0
             print('Frame Tint is now', 'PAUSED (hidden)' if state['paused'] else 'ON', flush=True)
             continue
+        if rec[:4] == b'FTE1':                    # where the eyes look: valid, then x/-z and y/-z relative to the head
+            ok, gx, gy = struct.unpack('<fff', rec[4:16])
+            state['gaze'] = (time.time(), ok > 0.5, gx, gy)
+            if ok > 0.5: acks['gw'] += 1
+            continue
         if rec[:4] != b'FTP1': continue
         m = np.frombuffer(rec, np.float32, 12, 4).reshape(3, 4)
         poses.append((time.time(), m[:, :3].astype(np.float64), m[:, 3].astype(np.float64)))
         acks['pw'] += 1
         if time.time() - acks['pt'] >= 2:
-            state['pose_fps'] = acks['pw'] / (time.time() - acks['pt']); acks['pt'], acks['pw'] = time.time(), 0
+            state['pose_fps'] = acks['pw'] / (time.time() - acks['pt']); state['gaze_fps'] = acks['gw'] / (time.time() - acks['pt'])
+            acks['pt'], acks['pw'], acks['gw'] = time.time(), 0, 0
         if len(poses) > 200: del poses[:100]
 
 state = {'paused': False, 'raw': None, 'pose': None, 'mem': False, 'seq': 0, 'frames': 0, 'ab': None, 'answers': 0, 'model_ms': 0.0, 'jpeg': None, 'jpeg_n': 0,
-         'cam_fps': 0.0, 'ans_fps': 0.0, 'problem': '', 'last': 0.0, 'shown': 0, 'viewers': 0, 'things': -1, 'things_ms': 0.0, 'disp_fps': 0.0, 'raw_l': None, 'last_l': 0.0, 'panel_fps': -1.0, 'ts': 0.0, 'mispairs': 0, 'pair_ms': 0.0, 'pose_fps': 0.0, 'pose_age': 0.0}
+         'cam_fps': 0.0, 'ans_fps': 0.0, 'problem': '', 'last': 0.0, 'shown': 0, 'viewers': 0, 'things': -1, 'things_ms': 0.0, 'disp_fps': 0.0, 'raw_l': None, 'last_l': 0.0, 'panel_fps': -1.0, 'ts': 0.0, 'mispairs': 0, 'pair_ms': 0.0, 'pose_fps': 0.0, 'pose_age': 0.0, 'gaze': None, 'gaze_fps': 0.0, 'remote': ''}
 lock = threading.Lock()
 new_jpeg = threading.Condition()
 
@@ -481,6 +553,101 @@ class LeftEye:
         _tick('left eye', t)
         return out
 
+mem_job = {'job': None}; mem_cv = threading.Condition()
+def mem_writer():                                  # writes answers into the color memory (the newest waiting one wins)
+    while True:
+        with mem_cv:
+            mem_cv.wait_for(lambda: mem_job['job'] is not None); job, mem_job['job'] = mem_job['job'], None
+        t = time.perf_counter(); memory.write(*job); _ctick('memory', t)
+
+CTIMES = {}                                        # how long each part of a color answer takes (ms, smoothed)
+def _ctick(name, t):
+    ms = (time.perf_counter() - t) * 1000; CTIMES[name] = ms if name not in CTIMES else CTIMES[name] * 0.8 + ms * 0.2
+    return time.perf_counter()
+
+class Remote:
+    """the optional PC helper (pc/colorize_server.py): the large color model on a PC's graphics card. Sends the
+    black-and-white view, gets colors back. When the PC does not answer, returns None (the headset model is used)
+    and tries again 5 seconds later."""
+    def __init__(s, addr):
+        host, _, port = addr.rpartition(':'); s.host, s.port = host or addr, int(port or 8765)
+        s.conn = None; s.retry_at = 0.0; s.ms = 0.0; s.ok = False; s.said = False
+    def color(s, view):
+        if time.time() < s.retry_at: return None
+        import http.client
+        try:
+            ok, jpg = cv2.imencode('.jpg', cv2.resize(view, (512, 512), interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 95])
+            if s.conn is None: s.conn = http.client.HTTPConnection(s.host, s.port, timeout=1.5)
+            t = time.time(); s.conn.request('POST', '/color', body=jpg.tobytes(), headers={'Content-Type': 'image/jpeg'})
+            r = s.conn.getresponse(); data = r.read()
+            if r.status != 200 or data[:4] != b'FTC1': raise IOError('unexpected answer (%d)' % r.status)
+            n, pc_ms = struct.unpack('<Hf', data[4:10])
+            ab = np.frombuffer(data[10:10 + 2 * n * n], np.int8).reshape(2, n, n).astype(np.float32)
+            s.ms = (time.time() - t) * 1000; state['remote'] = 'PC: %.0f ms round trip (%.0f ms on the PC)' % (s.ms, pc_ms)
+            if not s.ok: print('colors now come from the PC at %s:%d' % (s.host, s.port), flush=True); s.ok = True
+            return ab
+        except Exception as e:
+            if s.ok or not s.said: print('PC colorizer at %s:%d not reachable (%s: %s); using the headset model, trying again every 5 s' % (s.host, s.port, type(e).__name__, e), flush=True)
+            s.ok = False; s.said = True; s.retry_at = time.time() + 5; state['remote'] = 'headset model (PC not reachable)'
+            try: s.conn.close()
+            except Exception: pass
+            s.conn = None; return None
+remote = Remote(os.environ['FT_REMOTE'].strip()) if os.environ.get('FT_REMOTE', '').strip() else None
+
+FOV = {'n': 0, 'what': 'no gaze yet', 'rect': None, 'ms': 0, 'combine_ms': 0}
+MF = MW / 2 / np.tan(np.radians(VIEW_DEG / 2))   # focal length of the straightened picture the model looks at, in pixels
+K_PW = np.array([[VF, 0, PW / 2], [0, VF, PH / 2], [0, 0, 1]]); S_FLIP = np.diag([1.0, -1.0, -1.0])
+
+def fovea_rect(R):
+    """the square of the model's straightened picture (x0, y0, side) centred where the eyes look, for a frame taken with
+    head turn R; None when there is no fresh gaze or it is outside the picture."""
+    g = state['gaze']
+    if g is None or not g[1] or time.time() - g[0] > 0.3 or not poses:
+        FOV['what'] = 'no gaze: whole view only'; return None
+    d = np.array([g[2], g[3], -1.0]); d = R.T @ (poses[-1][1] @ (d / np.linalg.norm(d)))   # gaze now -> this frame's view
+    if d[2] > -0.2:
+        FOV['what'] = 'looking outside the picture'; return None
+    u = MW / 2 + MF * d[0] / -d[2]; v = MH / 2 - MF * d[1] / -d[2]
+    if not (0 <= u < MW and 0 <= v < MH):
+        FOV['what'] = 'looking outside the picture'; return None
+    side = int(min(MH, 2 * MF * np.tan(np.radians(FOVEA_DEG / 2))))
+    x0 = int(min(max(u - side / 2, 0), MW - side)); y0 = int(min(max(v - side / 2, 0), MH - side))
+    FOV['what'] = 'gaze area %d deg around (%d, %d)' % (FOVEA_DEG, u, v); FOV['rect'] = [x0, y0, side]
+    return x0, y0, side
+
+def fovea_combine(ab, rect, last_full, R):
+    """a whole-view answer for the frame taken with head turn R: the gaze-area answer ab (2,S,S) for rect, laid with a soft
+    edge over the newest whole-view answer turned to this frame. Returns colors (2,PH,PW) and the gaze area's mask (PH,PW)."""
+    full, R0 = last_full
+    Hm = K_PW @ S_FLIP @ R0.T @ R @ S_FLIP @ np.linalg.inv(K_PW)   # undo the head turn between the two frames
+    base = cv2.warpPerspective(np.ascontiguousarray(full.transpose(1, 2, 0)), Hm, (PW, PH), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE)
+    k = PW / MW; x0, y0 = int(round(rect[0] * k)), int(round(rect[1] * k)); sp = min(int(round(rect[2] * k)), PW - x0, PH - y0)
+    patch = cv2.resize(np.ascontiguousarray(ab.transpose(1, 2, 0)), (sp, sp), interpolation=cv2.INTER_LINEAR)
+    r = np.clip(np.minimum(np.arange(sp), sp - 1 - np.arange(sp)) / (0.2 * sp), 0, 1); r = r * r * (3 - 2 * r)
+    mask = np.zeros((PH, PW), np.float32); mask[y0:y0 + sp, x0:x0 + sp] = np.minimum.outer(r, r)
+    out = base.copy(); m = mask[y0:y0 + sp, x0:x0 + sp, None]
+    out[y0:y0 + sp, x0:x0 + sp] = base[y0:y0 + sp, x0:x0 + sp] * (1 - m) + patch * m
+    return np.ascontiguousarray(out.transpose(2, 0, 1)), mask
+
+_clahe = {}
+def stretch(g, amount, levels=None):
+    """the camera's picture is flat and milky (grey blacks, little depth), which makes any colors on it look like an old
+    tape. Stretch its brightness so the darkest 1% becomes black and the brightest 0.5% white (smoothed over time in
+    levels, so it does not pump), then add local contrast (CLAHE) the way a photo has it. amount 0..1 mixes this with the
+    picture as it is. levels=None: measure this picture alone (for the color model's input)."""
+    v = g[::8, ::8] if g.size > 200000 else g[::2, ::2]; v = v[v > 4]      # not the black corners
+    if v.size < 100: return g
+    lo, hi = np.percentile(v, (1, 99.5))
+    if levels is not None:
+        levels['lo'] = lo if levels['lo'] is None else levels['lo'] * 0.9 + lo * 0.1
+        levels['hi'] = hi if levels['hi'] is None else levels['hi'] * 0.9 + hi * 0.1
+        lo, hi = levels['lo'], levels['hi']
+    x = np.arange(256, dtype=np.float32)
+    out = cv2.LUT(g, np.clip((x - lo) / max(hi - lo, 20) * 255, 0, 255).astype(np.uint8))
+    if threading.get_ident() not in _clahe: _clahe[threading.get_ident()] = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+    out = _clahe[threading.get_ident()].apply(out)
+    return out if amount >= 1 else cv2.addWeighted(out, amount, g, 1 - amount, 0)
+
 def colorer():                                    # the slow part: asks the model for colors, newest frame each time
     so = ort.SessionOptions(); so.intra_op_num_threads = 4
     try:                                          # the model gets the fast cores to itself; everything else keeps off them
@@ -489,39 +656,75 @@ def colorer():                                    # the slow part: asks the mode
         print('color model on cores', sorted(os.sched_getaffinity(0)), 'with', so.intra_op_num_threads, 'threads', flush=True)
     except Exception as e:
         print('could not choose cores:', e, flush=True)
-    sess = ort.InferenceSession(model_file(MODEL), so, providers=['CPUExecutionProvider'])
-    name = sess.get_inputs()[0].name; S = sess.get_inputs()[0].shape[2]
-    print('model ready:', MODEL, flush=True)
+    TUNE['model'] = MODEL; loaded = None
+    def load(fname):
+        s_ = ort.InferenceSession(model_file(fname), so, providers=['CPUExecutionProvider'])
+        print('model ready:', fname, flush=True); return s_, s_.get_inputs()[0].name, s_.get_inputs()[0].shape[2]
     last, t0, n0 = 0, time.time(), 0
     cast = None                                   # the overall color cast, smoothed over the last few answers
+    last_full, n_ans = None, 0                    # the newest whole-view answer (colors at PW x PH, head turn)
+    mem_thread = None
     while True:
         if state['paused']: time.sleep(0.1); continue
+        if TUNE['model'] != loaded:                 # (switchable while running: /set?model=<file in the models folder>)
+            try:
+                sess, name, S = load(TUNE['model']); loaded = TUNE['model']; cast = None
+            except Exception as e:
+                print('could not load model %s: %s' % (TUNE['model'], e), flush=True); TUNE['model'] = loaded or MODEL
+                if loaded is None: raise
+                continue
         with lock:
             raw, seq, pose = state['raw'], state['seq'], state['pose']
         if raw is None or seq == last:
             time.sleep(0.005); continue
         last = seq
+        tc = time.perf_counter()
         g = cv2.remap(raw, model_maps[0], model_maps[1], cv2.INTER_LINEAR)
-        x = cv2.resize(g, (S, S), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
-        t = time.time()
-        ab = sess.run(None, {name: np.repeat(x[None, None], 3, axis=1)})[0][0]
-        ms = (time.time() - t) * 1000
-        if BALANCE > 0:                           # white balance: take out part of the most common color (walls, ceiling)
+        rect = None                               # every FOVEA_EVERY-th answer: only the area around the gaze
+        if GAZE and TUNE['fovea'] and pose is not None and last_full is not None and n_ans % FOVEA_EVERY == FOVEA_EVERY - 1:
+            rect = fovea_rect(pose[1])
+        view = g if rect is None else g[rect[1]:rect[1] + rect[2], rect[0]:rect[0] + rect[2]]
+        ab = remote.color(view) if (remote is not None and TUNE['remote']) else None   # the PC's large model, if it answers
+        if ab is not None:
+            ms = remote.ms
+            x = cv2.resize(view, (ab.shape[2], ab.shape[1]), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+        else:                                     # the headset's own model
+            x = cv2.resize(view, (S, S), interpolation=cv2.INTER_AREA)
+            if TUNE['model_contrast']: x = stretch(x, 1.0)  # a photo-like picture: the model guesses less orange on it
+            x = x.astype(np.float32) / 255.0
+            t = time.time()
+            ab = sess.run(None, {name: np.repeat(x[None, None], 3, axis=1)})[0][0]
+            ms = (time.time() - t) * 1000
+        n_ans += 1; tc = _ctick('model', tc)
+        if TUNE['balance'] > 0:                   # white balance: take out part of the most common color (walls, ceiling)
             ok = x[::4, ::4] > 0.03               # not the black corners
-            if ok.sum() > 100:
+            if rect is None and ok.sum() > 100:   # (measured on whole-view answers only)
                 med = np.array([np.median(ab[0][::4, ::4][ok]), np.median(ab[1][::4, ::4][ok])], np.float32)
                 cast = med if cast is None else cast * 0.7 + med * 0.3
             if cast is not None:
-                ab = ab - (BALANCE * cast)[:, None, None]
-        small = np.stack([cv2.resize(ab[0], (PW, PH), interpolation=cv2.INTER_AREA), cv2.resize(ab[1], (PW, PH), interpolation=cv2.INTER_AREA)])
+                ab = ab - (TUNE['balance'] * cast)[:, None, None]
         gs = cv2.resize(g, (PW, PH), interpolation=cv2.INTER_AREA)
-        if memory is not None and pose is not None:
-            memory.write(small, gs, pose[1])
-        follower.new_answer(small, gs, None if pose is None else pose[1])
+        weight = None
+        if rect is None:
+            small = np.stack([cv2.resize(ab[0], (PW, PH), interpolation=cv2.INTER_AREA), cv2.resize(ab[1], (PW, PH), interpolation=cv2.INTER_AREA)])
+            if pose is not None: last_full = (small, pose[1].copy())
+        else:
+            t = time.time()
+            small, mask = fovea_combine(ab, rect, last_full, pose[1])
+            weight = 0.3 + 1.7 * mask              # the gaze area counts double; the carried-over rest counts little
+            FOV['n'] += 1; FOV['ms'] = round(ms); FOV['combine_ms'] = round((time.time() - t) * 1000)
+        tc = _ctick('prepare', tc)
+        if memory is not None and pose is not None:   # written by its own thread, so the next answer can be asked for at once
+            if mem_thread is None: mem_thread = threading.Thread(target=mem_writer, daemon=True); mem_thread.start()
+            with mem_cv:
+                mem_job['job'] = (small, gs, pose[1], weight); mem_cv.notify()
+        if rect is None or memory is None or pose is None:   # gaze-area answers go into the memory only: shown directly they
+            follower.new_answer(small, gs, None if pose is None else pose[1])   # alternate with whole-view ones and flicker
         with lock:
             state['mem'] = memory is not None and pose is not None
             state['ab'] = small if state['ab'] is None else state['ab'] * SMOOTH + small * (1 - SMOOTH)
             state['answers'] += 1; state['model_ms'] = ms
+        _ctick('finish', tc)
         n0 += 1
         if time.time() - t0 >= 4:
             state['ans_fps'] = n0 / (time.time() - t0); t0, n0 = time.time(), 0
@@ -563,7 +766,7 @@ def start_overlay():                              # the in-headset panel, if ./f
         print('no in-headset panel (ftoverlay not built or switched off); browser preview only', flush=True); return None
     width = 2 * DIST * np.tan(np.radians(VIEW_DEG / 2)) * SCALE          # life size at SCALE = 1
     try:
-        ovl = subprocess.Popen(OVERLAY + ['%.3f' % width, '%.3f' % DIST, '%.3f' % ALPHA, 'poses'] + (['sbs'] if STEREO else []), stdin=subprocess.PIPE, stdout=subprocess.PIPE, cwd=HERE,
+        ovl = subprocess.Popen(OVERLAY + ['%.3f' % width, '%.3f' % DIST, '%.3f' % ALPHA, 'poses'] + (['sbs'] if STEREO else []) + (['gaze'] if GAZE else []), stdin=subprocess.PIPE, stdout=subprocess.PIPE, cwd=HERE,
                                env=dict(os.environ, FT_TEXEL=os.environ.get('FT_TEXEL', '1'), **({'FT_SHM': SHM_PATH} if SHM is not None else {})),
                                preexec_fn=_panel_cores)
         threading.Thread(target=pose_reader, args=(ovl,), daemon=True).start()
@@ -654,9 +857,11 @@ def composer():                                   # the fast part: newest bright
         t = t_start = time.perf_counter()
         g = cv2.remap(raw, view_maps[0], view_maps[1], cv2.INTER_LINEAR)
         g_out = g if OW == PW else cv2.remap(raw, out_maps[0], out_maps[1], cv2.INTER_LINEAR)
+        if TUNE['degrain']: g_out = cv2.medianBlur(g_out, 3)                  # the camera's grain
+        if TUNE['contrast'] > 0: g_out = stretch(g_out, TUNE['contrast'], LEVELS)
         t = _tick('straighten', t)
         if follower.ans is not None:              # remembered colors where the room is unchanged, followed colors elsewhere
-            ab = blend(memory if state['mem'] else None, follower, g, None if pose is None else pose[1], OW, OH)
+            ab = blend(memory if state['mem'] else None, follower, g, None if pose is None else pose[1], OW, OH, g_out)
         elif ab is not None and OW != PW:
             ab = np.stack([cv2.resize(ab[0], (OW, OH), interpolation=cv2.INTER_LINEAR), cv2.resize(ab[1], (OW, OH), interpolation=cv2.INTER_LINEAR)])
         t = _tick('colors', t)
@@ -721,11 +926,27 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/':
             self.send_response(200); self.send_header('Content-Type', 'text/html'); self.end_headers(); self.wfile.write(PAGE)
+        elif self.path.startswith('/set') and self.client_address[0] in ('127.0.0.1', '::1'):   # live tuning, from the headset itself only
+            from urllib.parse import urlparse, parse_qs
+            for k, v in parse_qs(urlparse(self.path).query).items():
+                if k == 'vivid': TUNE['vivid'] = min(4.0, max(0.5, float(v[0])))
+                elif k in ('sharp', 'solid', 'degrain', 'model_contrast'): TUNE[k] = v[0] not in ('0', 'false', 'off')
+                elif k in ('balance', 'contrast'): TUNE[k] = min(1.0, max(0.0, float(v[0])))
+                elif k == 'steady': TUNE[k] = min(1.0, max(0.05, float(v[0])))
+                elif k in ('fovea', 'remote'): TUNE[k] = v[0] not in ('0', 'false', 'off')
+                elif k == 'model' and os.path.basename(v[0]) == v[0] and v[0].endswith('.onnx') and os.path.exists(os.path.join(ROOT, 'models', v[0])): TUNE[k] = v[0]
+            body = json.dumps(TUNE).encode()
+            self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers(); self.wfile.write(body)
         elif self.path == '/stats':
             d = {k: state[k] for k in ('cam_fps', 'ans_fps', 'model_ms', 'answers', 'frames', 'problem', 'things', 'things_ms')}
+            d['remote'] = state['remote'] if remote is not None else 'off'
+            d['answer_ms'] = {k: round(v) for k, v in CTIMES.items()}
             d['memory'] = round(memory.filled() * 100) if (memory is not None and state['mem']) else -1
             d['age'] = time.time() - state['last'] if state['last'] else -1
-            T = dict(TIMES); d['disp'] = 'display %.0f pictures/s made, %s reach the headset, %.0f ms each (%s), %.0f ms behind the camera; head tracking %.0f/s, off by %.0f ms%s' % (state['disp_fps'], ('%.0f/s' % state['panel_fps']) if state['panel_fps'] >= 0 else 'unknown how many', T.get('total', 0), ', '.join('%s %.0f' % (k, T[k]) for k in ('straighten', 'follow', 'memory', 'edges', 'vivid', 'picture', 'panel', 'left eye') if k in T), T.get('behind', 0), state['pose_fps'], abs(state['pose_age']), ('; two eyes %.1f ms apart, %d pictures out of step so far' % (state['pair_ms'], state['mispairs'])) if STEREO else '')
+            T = dict(TIMES); d['disp'] = 'display %.0f pictures/s made, %s reach the headset, %.0f ms each (%s), %.0f ms behind the camera; head tracking %.0f/s, off by %.0f ms%s' % (state['disp_fps'], ('%.0f/s' % state['panel_fps']) if state['panel_fps'] >= 0 else 'unknown how many', T.get('total', 0), ', '.join('%s %.0f' % (k, T[k]) for k in ('straighten', 'follow', 'memory', 'edges', 'vivid', 'steady', 'upsize', 'picture', 'panel', 'left eye') if k in T), T.get('behind', 0), state['pose_fps'], abs(state['pose_age']), ('; two eyes %.1f ms apart, %d pictures out of step so far' % (state['pair_ms'], state['mispairs'])) if STEREO else '')
+            if GAZE:
+                d['fovea'] = dict(FOV, gaze_fps=round(state['gaze_fps'], 1))
+                d['disp'] += '; eye tracking %.0f answers/s, %d gaze-area answers (%s)' % (state['gaze_fps'], FOV['n'], FOV['what'])
             body = json.dumps(d).encode()
             self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers(); self.wfile.write(body)
         elif self.path == '/stream':

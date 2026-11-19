@@ -17,6 +17,8 @@
 // A picture may also start with "FTS1": like FTV2, but instead of the pixels it carries one number, which of the
 // pictures in the shared memory file named by FT_SHM to show. That avoids pushing every pixel through the pipe.
 // With  poses , a 52-byte "FTA1" note is written to standard output after each picture has been handed to SteamVR.
+// With  poses gaze , a 52-byte "FTE1" record follows each head pose: float valid, then where the eyes look as a
+// direction relative to the head (x/-z, y/-z; x right, y up), from SteamVR's eye-tracked foveation centre.
 //
 // Pictures are handed to SteamVR as graphics-card textures, two of them used in turn, so the panel never shows a
 // missing or half-updated picture (which is what made the first version flicker).
@@ -24,6 +26,7 @@
 // The way of joining SteamVR (as a background app) and the texture upload follow Passthrough PiP for Steam Frame,
 // MIT licence, Copyright (c) 2026 Sippbox.
 #include <fcntl.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -245,7 +248,41 @@ struct Gpu {
 };
 
 static std::atomic<bool> g_run{true};
-static void PoseLoop() {
+
+// Where the eyes look, as a direction relative to the head: x/-z and y/-z (x right, y up, -z forward).
+// SteamVR gives the per-eye foveation centre in each eye's NDC; undo that eye's projection and its eye-to-head turn,
+// then average the two eyes. Returns false while the eye tracker has no answer (blink, headset off).
+struct GazeReader {
+  float p00[2], p02[2], p11[2], p12[2];
+  vr::HmdMatrix34_t eyeToHead[2];
+  GazeReader() {
+    for (int e = 0; e < 2; e++) {
+      const vr::HmdMatrix44_t P = vr::VRSystem()->GetProjectionMatrix((vr::EVREye)e, 0.1f, 100.f);
+      p00[e] = P.m[0][0]; p02[e] = P.m[0][2]; p11[e] = P.m[1][1]; p12[e] = P.m[1][2];
+      eyeToHead[e] = vr::VRSystem()->GetEyeToHeadTransform((vr::EVREye)e);
+    }
+  }
+  bool Read(float *tx, float *ty) const {
+    vr::HmdVector2_t ndc[2];
+    if (!vr::VRSystem()->GetEyeTrackedFoveationCenter(&ndc[0], &ndc[1])) return false;
+    float s[3] = {0, 0, 0};
+    for (int e = 0; e < 2; e++) {
+      const float v[3] = {(ndc[e].v[0] + p02[e]) / p00[e], (ndc[e].v[1] + p12[e]) / p11[e], -1.f};
+      float h[3];
+      for (int r = 0; r < 3; r++) h[r] = eyeToHead[e].m[r][0] * v[0] + eyeToHead[e].m[r][1] * v[1] + eyeToHead[e].m[r][2] * v[2];
+      const float n = sqrtf(h[0] * h[0] + h[1] * h[1] + h[2] * h[2]);
+      for (int r = 0; r < 3; r++) s[r] += h[r] / n;
+    }
+    if (s[2] > -0.1f) return false;
+    *tx = s[0] / -s[2];
+    *ty = s[1] / -s[2];
+    return true;
+  }
+};
+
+static void PoseLoop(bool gaze) {
+  GazeReader *gr = gaze ? new GazeReader() : nullptr;
+  if (gr) fprintf(stderr, "overlay: sending where the eyes look (gaze)\n");
   while (g_run) {
     vr::TrackedDevicePose_t p{};
     vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, &p, 1);
@@ -255,8 +292,17 @@ static void PoseLoop() {
       memcpy(rec + 4, &p.mDeviceToAbsoluteTracking.m[0][0], 48);
       if (write(1, rec, sizeof rec) != (ssize_t)sizeof rec) break;
     }
+    if (gr) {                                              // "FTE1", float valid, float x/-z, float y/-z (head directions)
+      char rec[52] = {0};
+      float g[3] = {0, 0, 0};
+      g[0] = gr->Read(&g[1], &g[2]) ? 1.f : 0.f;
+      memcpy(rec, "FTE1", 4);
+      memcpy(rec + 4, g, sizeof g);
+      if (write(1, rec, sizeof rec) != (ssize_t)sizeof rec) break;
+    }
     usleep(10000);
   }
+  delete gr;
 }
 
 static std::atomic<bool> g_on{true};                       // false while the user has switched Frame Tint off from the controller
@@ -384,10 +430,11 @@ int main(int argc, char **argv) {
           useGpu ? "smooth texture path" : "FALLBACK path that may flicker");
   if (gerr) fprintf(stderr, "overlay: graphics setup said: %s\n", gerr);
 
-  bool wantPoses = false, sbs = false;
+  bool wantPoses = false, sbs = false, wantGaze = false;
   for (int i = 4; i < argc; i++) {
     if (!strcmp(argv[i], "poses")) wantPoses = true;
     if (!strcmp(argv[i], "sbs")) sbs = true;
+    if (!strcmp(argv[i], "gaze")) wantGaze = true;
   }
   if (sbs) {
     const float texel = getenv("FT_TEXEL") ? (float)atof(getenv("FT_TEXEL")) : 0.5f;
@@ -396,7 +443,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "overlay: one view per eye (side by side): SteamVR said %s; texel shape %.2f\n", ov->GetOverlayErrorNameFromEnum(fe), texel);
   }
   std::thread poseThread;
-  if (wantPoses) poseThread = std::thread(PoseLoop);
+  if (wantPoses) poseThread = std::thread(PoseLoop, wantGaze);
   g_notes = wantPoses;
   std::thread inputThread, dashThread;
   {

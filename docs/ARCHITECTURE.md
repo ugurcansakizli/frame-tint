@@ -68,9 +68,20 @@ number, `double` time as `CLOCK_MONOTONIC` seconds when the grabber saw the fram
 
 **`ftoverlay` stdout** (with the `poses` argument): fixed 52-byte records: `"FTP1"` + 12 floats (head pose, about 100 Hz),
 `"FTA1"` (a picture has been handed to SteamVR; the sender waits for it before reusing a slot), `"FTT1"` + float
-(1 = switched on, 0 = off, from the controller or dashboard), `"FTQ1"` (Quit pressed in the dashboard panel).
+(1 = switched on, 0 = off, from the controller or dashboard), `"FTQ1"` (Quit pressed in the dashboard panel), and with
+`gaze` `"FTE1"` + 3 floats after each pose (valid, then where the eyes look relative to the head as x/-z and y/-z).
 
-`ftoverlay` arguments: `<panel width m> <distance m> <opacity> [poses] [sbs]`; environment `FT_TEXEL`, `FT_SHM`, `FT_SHARE`.
+`ftoverlay` arguments: `<panel width m> <distance m> <opacity> [poses] [sbs] [gaze]`; environment `FT_TEXEL`, `FT_SHM`, `FT_SHARE`.
+
+## Eye tracking (`FT_FOVEA=1`)
+
+A background app gets the gaze from `IVRSystem::GetEyeTrackedFoveationCenter` (per-eye NDC; undone through each eye's
+projection matrix, NDC y up). It answers about 100 times a second on the Frame. The SteamVR Input route (an
+`eyetracking` action bound to `/user/eyes_ext/input/gaze_ext`) loads without errors but returns no data to a
+background app. Every `FT_FOVEA_EVERY`-th color answer runs the model on a `FT_FOVEA_DEG` square of the straightened
+picture centred on the gaze (moved to the frame's head turn); that answer is laid with a soft edge over the newest
+whole-view answer (turned to the same frame) and written to the color memory with double weight inside the area.
+Colouring only the looked-at thing and leaving the rest grey was tried and dropped: losing the periphery is worse.
 
 ## The color pipeline (`live_server.py`)
 
